@@ -202,7 +202,6 @@ class MoEBlock(nn.Module):
 class PiZero(nn.Module):
     """Pi_Zero Policy Implementation"""
 
-    max_images: int
     vit_variant: str
     llm_vocab_size: int
 
@@ -262,8 +261,9 @@ class PiZero(nn.Module):
         out = {}
         B = images.shape[0]
         A = action.shape[1]
+        a = action.shape[2]
         P = proprio.shape[1]
-        I = self.max_images
+        I = images.shape[1]
         T = text.shape[1]
 
         action_token_embed = ActionEmbedder(
@@ -287,22 +287,27 @@ class PiZero(nn.Module):
             self.embed_dtype
         )  # [B, P, D]
 
-        images = images[:, : self.max_images, :, :, :]
-        images = images.reshape(B * self.max_images, *images.shape[2:])
+        images = images.reshape(B * I, *images.shape[2:])
         vit_config = vit.decode_variant(self.vit_variant)
         image_token_embed, aux = vit.ViT(
             num_classes=self.gemma_embed_dim, name="img", **vit_config
         )(
             images
         )  # [B * I, D]
-        image_token_embed = image_token_embed.reshape(B, I, self.gemma_embed_dim)
         del aux
+        images = images.reshape(B, I, *images.shape[1:])
+        image_token_embed = image_token_embed.reshape(B, I, self.gemma_embed_dim)
         image_token_embed = image_token_embed.astype(self.embed_dtype)
 
-        embedder = Embedder(
-            vocab_size=self.llm_vocab_size, embed_dim=self.gemma_embed_dim, name="gemma_embedder"
-        )
-        text_token_embed = embedder.encode(text).astype(self.embed_dtype)  # [B, T, D]
+        if text.shape[1] > 0:
+            embedder = Embedder(
+                vocab_size=self.llm_vocab_size,
+                embed_dim=self.gemma_embed_dim,
+                name="gemma_embedder",
+            )
+            text_token_embed = embedder.encode(text).astype(self.embed_dtype)  # [B, T, D]
+        else:
+            text_token_embed = jnp.zeros((B, 0, self.gemma_embed_dim))
 
         # run attention (need to pass in)
         L = I + T + P + A
@@ -312,7 +317,7 @@ class PiZero(nn.Module):
         input_mask = np.ones([B, L])
         # NOTE: if images are missing, assume we populate them with all 0
         img_mask = images.any(axis=(-3, -2, -1))
-        input_mask[:, : self.max_images] = input_mask[:, : self.max_images] * img_mask
+        input_mask[:, :I] = input_mask[:, :I] * img_mask
         mask_ar = np.zeros([B, L])
         mask_ar[:, I + T] = 1
         mask_ar[:, I + T + P] = 1
@@ -368,6 +373,7 @@ class PiZero(nn.Module):
         x = jnp.concatenate(
             [image_token_embed, text_token_embed, proprio_token_embed, action_token_embed], axis=1
         )
+        out["pre_attention_embeddings"] = x
         for block in blocks:
             x = block(
                 x=x,
@@ -379,15 +385,12 @@ class PiZero(nn.Module):
             )
 
         assert x.dtype == jnp.dtype(self.embed_dtype)  # Sanity check.
-        out["encoded"] = x
+        out["post_attention_embeddings"] = x
 
         x = RMSNorm(name="final_norm")(x)
-        out["pre_logits"] = x
+        out["final_normed_embeddings"] = x
 
-        x = embedder.decode(x)
-        out["logits_pre_norm"] = x
-        if self.final_logits_softcap:
-            x = jnp.tanh(x / self.final_logits_softcap) * self.final_logits_softcap
-        out["logits"] = x
+        action_embeddings = x[:, -A:, :]
+        action_field_pred = nn.Dense(features=a, name="proj_action_dim")(action_embeddings)
 
-        return x, out
+        return action_field_pred, out
