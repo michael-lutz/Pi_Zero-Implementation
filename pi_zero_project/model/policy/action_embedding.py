@@ -63,7 +63,9 @@ class ActionEmbedder(nn.Module):
         assert len(timestep.shape) == 1, "Timestep must have shape [B]."
 
         timestep_embed = sinusoidal_positional_encoding(timestep, self.embed_dim)  # [B, D]
-        timestep_embed = jnp.repeat(timestep_embed, noisy_action.shape[1], axis=1)  # [B, A, D]
+        timestep_embed = jnp.tile(
+            timestep_embed[:, None, :], (1, noisy_action.shape[1], 1)
+        )  # [B, A, D]
 
         W1 = nn.Dense(self.embed_dim, name="W1")
         W2 = nn.Dense(self.embed_dim, name="W2")

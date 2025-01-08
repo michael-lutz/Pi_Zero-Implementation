@@ -15,11 +15,10 @@ There are many dimensions... For the reader's benefit:
 - a: size of action dimension
 """
 
-from typing import Any, Tuple
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+import numpy as np
 
 from pi_zero_project.model.components.attention import Attention, apply_attention, make_attn_mask
 from pi_zero_project.model.components.linear import FeedForward
@@ -154,7 +153,7 @@ class MoEBlock(nn.Module):
         inputs_normalized_gemma = self.pre_attention_norm(x_gemma)  # [B, I + T, D]
         inputs_normalized_action = self.pre_attention_norm(x_action)  # [B, 1 + A, D]
         positions_gemma = positions[:, : x_gemma.shape[1]]
-        positions_action = positions[:, x_gemma.shape[1] + 1 :]
+        positions_action = positions[:, x_gemma.shape[1] :]
 
         # TODO: thoroughly think through how to handle kv-cache
         q_gemma, k_gemma, v_gemma = self.gemma_attn.get_qkv(
@@ -264,7 +263,7 @@ class PiZero(nn.Module):
         B = images.shape[0]
         A = action.shape[1]
         P = proprio.shape[1]
-        I = images.shape[1]
+        I = self.max_images
         T = text.shape[1]
 
         action_token_embed = ActionEmbedder(
@@ -289,12 +288,14 @@ class PiZero(nn.Module):
         )  # [B, P, D]
 
         images = images[:, : self.max_images, :, :, :]
+        images = images.reshape(B * self.max_images, *images.shape[2:])
         vit_config = vit.decode_variant(self.vit_variant)
         image_token_embed, aux = vit.ViT(
             num_classes=self.gemma_embed_dim, name="img", **vit_config
         )(
             images
-        )  # [B, I, D]
+        )  # [B * I, D]
+        image_token_embed = image_token_embed.reshape(B, I, self.gemma_embed_dim)
         del aux
         image_token_embed = image_token_embed.astype(self.embed_dtype)
 
@@ -308,13 +309,15 @@ class PiZero(nn.Module):
         positions = jnp.arange(L).astype(jnp.int32)[None, :]
 
         # Applying block-wise causal mask as in the paper
-        input_mask = jnp.ones([B, L])
+        input_mask = np.ones([B, L])
         # NOTE: if images are missing, assume we populate them with all 0
         img_mask = images.any(axis=(-3, -2, -1))
         input_mask[:, : self.max_images] = input_mask[:, : self.max_images] * img_mask
-        mask_ar = jnp.zeros([B, L])
+        mask_ar = np.zeros([B, L])
         mask_ar[:, I + T] = 1
         mask_ar[:, I + T + P] = 1
+        input_mask = jnp.array(input_mask)
+        mask_ar = jnp.array(mask_ar)
         attn_mask = make_attn_mask(input_mask, mask_ar)
         attn_mask = attn_mask[:, None, :, :]
 

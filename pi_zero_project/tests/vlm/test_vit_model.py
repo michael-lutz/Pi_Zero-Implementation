@@ -16,7 +16,7 @@ from pytest_snapshot.plugin import Snapshot
 @pytest.fixture
 def model():
     # Create a small variant of the model for testing
-    return Model(num_classes=10, variant="Ti/16")
+    return Model(num_classes=10, variant="mu/16")
 
 
 def test_model_initialization(model: nn.Module) -> None:
