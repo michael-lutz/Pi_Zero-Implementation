@@ -10,6 +10,33 @@ from pi_zero_project.model.components.linear import Einsum, MlpBlock
 from pi_zero_project.model.components.pos_embed import apply_rope
 
 
+def make_attn_mask(input_mask: jax.Array, mask_ar: jax.Array) -> jax.Array:
+    """Returns attention mask bool[B, N, N] to use in transformer.
+
+    Tokens can attend to valid inputs tokens which have a cumulative mask_ar
+    smaller or equal to theirs. This way `mask_ar` int[B, N] can be used to
+    setup several types of attention, for example:
+
+      [[1 1 1 1 1 1]]: pure causal attention.
+
+      [[0 0 0 1 1 1]]: prefix-lm attention. The first 3 tokens can attend between
+          themselves and the last 3 tokens have a causal attention. The first
+          entry could also be a 1 without changing behaviour.
+
+      [[1 0 1 0 1 0 0 1 0 0]]: causal attention between 4 blocks. Tokens of a
+          block can attend all previous blocks and all tokens on the same block.
+
+    Args:
+        input_mask: bool[B, N] true if its part of the input, false if padding.
+        mask_ar: int32[B, N] mask that's 1 where previous tokens cannot depend on
+            it and 0 where it shares the same attention mask as the previous token.
+    """
+    cumsum = jnp.cumsum(mask_ar, axis=1)
+    attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
+    valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
+    return jnp.logical_and(attn_mask, valid_mask)
+
+
 def update_kv_cache(
     module: nn.Module,
     k: jax.Array,
