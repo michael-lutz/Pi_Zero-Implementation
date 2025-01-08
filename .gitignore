@@ -4,4 +4,6 @@
 *.egg-info
 *.pyc
 
-*/scratch
+checkpoints/
+wandb/
+scratch/
