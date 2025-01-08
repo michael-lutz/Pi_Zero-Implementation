@@ -29,8 +29,7 @@ def sinusoidal_positional_encoding(timesteps: jnp.ndarray, embed_dim: int) -> jn
 
 
 class ActionEmbedder(nn.Module):
-    """
-    Embeds noisy actions into a transformer embedding dimension using a flow-matching timestep.
+    """Embeds noisy actions into a transformer embedding dimension using a flow-matching timestep.
 
     As specified in the paper, the embedding is computed as:
         W_3 · swish(W_2 · concat(W_1 · a_{t'}^τ, ϕ(τ))),
@@ -49,8 +48,7 @@ class ActionEmbedder(nn.Module):
 
     @nn.compact
     def __call__(self, noisy_action: jax.Array, timestep: jax.Array) -> jax.Array:
-        """
-        Computes the embedding for a noisy action and timestep.
+        """Computes the embedding for a noisy action and timestep.
 
         Args:
             noisy_action: Noisy action chunk [B, A, a].

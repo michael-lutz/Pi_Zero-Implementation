@@ -1,5 +1,7 @@
 """Train the model"""
 
+import os
+import pickle
 import jax
 import jax.numpy as jnp
 import optax
@@ -15,20 +17,23 @@ checkpoint_dir = "../../checkpoints/"
 # Configuration for model selection
 config = {
     "model_name": "PiZero",
-    "vit_variant": "B/16",
-    "llm_vocab_size": 30522,
-    "gemma_mlp_dim": 2048,
-    "gemma_embed_dim": 768,
-    "action_expert_mlp_dim": 2048,
-    "action_expert_embed_dim": 768,
-    "depth": 12,
-    "num_heads": 12,
-    "num_kv_heads": 12,
-    "head_dim": 64,
-    "dropout": 0.1,
+    "model_arguments": {
+        "vit_variant": "S/16",
+        "llm_vocab_size": 0,  # shouldn't be used anyways...
+        "gemma_mlp_dim": 2048,
+        "gemma_embed_dim": 512,
+        "action_expert_mlp_dim": 1024,
+        "action_expert_embed_dim": 256,
+        "depth": 12,
+        "num_heads": 6,
+        "num_kv_heads": 1,
+        "head_dim": 64,
+        "dropout": 0.1,
+    },
 }
 
 log_every_n_steps = 1
+save_every_n_steps = 20
 
 # Load dataset
 prng_key = jax.random.PRNGKey(0)
@@ -82,6 +87,12 @@ for epoch in range(10):  # Number of epochs
         if i % log_every_n_steps == 0:
             wandb.log({"epoch": epoch, "loss": loss})
             print(f"Epoch {epoch}, Loss: {loss}")
+
+        if i % save_every_n_steps == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{i}.pkl")
+            os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure the directory exists
+            with open(checkpoint_path, "wb") as f:
+                pickle.dump(params, f)
 
 # Finish the wandb run
 wandb.finish()
