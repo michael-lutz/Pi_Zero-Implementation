@@ -19,7 +19,7 @@
 However, the names of modules are made to match the old ones for easy loading.
 """
 
-from typing import Optional, Sequence, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 from absl import logging
 import flax
@@ -127,7 +127,7 @@ class Encoder(nn.Module):
         return nn.LayerNorm(name="encoder_norm")(x), out
 
 
-class _Model(nn.Module, BaseImageModel):
+class ViT(nn.Module, BaseImageModel):
     """ViT model."""
 
     num_classes: Optional[int] = None
@@ -238,10 +238,10 @@ class _Model(nn.Module, BaseImageModel):
 
 def Model(num_classes=None, *, variant=None, **kw):  # pylint: disable=invalid-name
     """Factory function"""
-    return _Model(num_classes, **{**decode_variant(variant), **kw})
+    return ViT(num_classes, **{**decode_variant(variant), **kw})
 
 
-def decode_variant(variant):
+def decode_variant(variant: str) -> Dict[str, Any]:
     """Converts a string like "B" or "B/32" into a params dict."""
     if variant is None:
         return {}

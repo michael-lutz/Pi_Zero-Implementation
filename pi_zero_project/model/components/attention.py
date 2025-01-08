@@ -42,7 +42,7 @@ def update_kv_cache(
     k: jax.Array,
     v: jax.Array,
     cache_size: int,
-    cache_dtype: jnp.dtype | None,
+    cache_dtype: str | jnp.dtype | None,
 ) -> Tuple[jax.Array, jax.Array]:
     """Updates KV cache and returns its current contents.
 
@@ -87,6 +87,52 @@ def update_kv_cache(
     return k_cache.value.astype(k.dtype), v_cache.value.astype(v.dtype)
 
 
+def apply_attention(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attn_mask: jax.Array,
+    num_kv_heads: int,
+    attn_logits_softcap: float | None,
+) -> jax.Array:
+    """Apply attention to q, k, v. in gemma style.
+
+    Args:
+        q: [B, T, D] query tokens
+        k: [B, S, D] key tokens
+        v: [B, S, D] value tokens
+        attn_mask: [B, 1, T, S] attention mask
+        num_kv_heads: number of key/value heads
+        attn_logits_softcap: attention logits softcap
+
+    Returns:
+        [B, T, D] output embeddings
+    """
+    q = einops.rearrange(q, "B T (K G) H -> B T K G H", K=num_kv_heads)
+    logits = jnp.einsum("BTKGH,BSKH->BKGTS", q, k)
+    logits = logits.astype(jnp.float32)
+
+    if attn_logits_softcap:
+        logits = jnp.tanh(logits / attn_logits_softcap)
+        logits = logits * attn_logits_softcap
+
+    if attn_mask.shape != (q.shape[0], 1, q.shape[1], k.shape[1]):
+        raise ValueError(
+            f"Attention mask with shape {attn_mask.shape} but shapes for q and k "
+            f"are: {q.shape} and {k.shape}"
+        )
+
+    big_neg = -2.3819763e38  # See gemma/modules.py
+    masked_logits = jnp.where(attn_mask[:, :, None, :, :], logits, big_neg)
+
+    probs = jax.nn.softmax(masked_logits, axis=-1).astype(k.dtype)
+
+    encoded = jnp.einsum("BKGTS,BSKH->BTKGH", probs, v)
+    encoded = einops.rearrange(encoded, "B T K G H -> B T (K G) H")
+
+    return encoded
+
+
 class Attention(nn.Module):
     """Gemma's Attention module.
 
@@ -111,7 +157,7 @@ class Attention(nn.Module):
     query_pre_attn_norm: str
     attn_logits_softcap: float | None
 
-    cache_dtype: jnp.dtype | None = None
+    cache_dtype: str | None = None
 
     def setup(self) -> None:
         if self.num_kv_heads == self.num_heads:
@@ -152,6 +198,51 @@ class Attention(nn.Module):
             ),
         )
 
+    def get_qkv(
+        self, x: jax.Array, positions: jax.Array, cache_size: int = 0, decode: bool = False
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        """Get q, k, v for attention.
+
+        Args:
+            x: [B, L, D] input tokens
+            positions: [B, L] absolute positions of the tokens
+            cache_size: size of the cache
+            decode: whether to use kv-cache
+
+        Returns:
+            Tuple[jax.Array, jax.Array, jax.Array]: q, k, v
+        """
+        if self.num_kv_heads == self.num_heads:
+            q, k, v = self.qkv_einsum("BSD,3KDH->3BSKH", x)
+        else:
+            q = self.q_einsum("BTD,NDH->BTNH", x)
+            k, v = self.kv_einsum("BSD,2KDH->2BSKH", x)
+
+        q = apply_rope(q, positions=positions)
+        if self.query_pre_attn_norm == "rsqrt_head_dim":
+            q *= self.head_dim**-0.5
+        elif self.query_pre_attn_norm == "rsqrt_emb_per_head":
+            q *= (self.features // self.num_heads) ** -0.5
+        else:
+            raise ValueError(f"Unknown query_pre_attn_norm: {self.query_pre_attn_norm}")
+
+        k = apply_rope(k, positions=positions)
+        if decode and cache_size > 0:
+            k, v = update_kv_cache(self, k, v, cache_size=cache_size, cache_dtype=self.cache_dtype)
+
+        return q, k, v
+
+    def proj_to_embed_dim(self, x: jax.Array) -> jax.Array:
+        """Projects x to embed dim
+
+        Args:
+            x: [B, T, Number of Heads, Head Dimension] input embeddings
+
+        Returns:
+            [B, T, D] output embeddings
+        """
+        return self.attn_vec_einsum("BTNH,NHD->BTD", x)
+
     @nn.compact
     def __call__(
         self,
@@ -171,48 +262,10 @@ class Attention(nn.Module):
         Returns:
             [N, L, D] output embeddings
         """
-        if self.num_kv_heads == self.num_heads:
-            q, k, v = self.qkv_einsum("BSD,3KDH->3BSKH", x)
-        else:
-            q = self.q_einsum("BTD,NDH->BTNH", x)
-            k, v = self.kv_einsum("BSD,2KDH->2BSKH", x)
-
-        q = apply_rope(q, positions=positions)
-        if self.query_pre_attn_norm == "rsqrt_head_dim":
-            q *= self.head_dim**-0.5
-        elif self.query_pre_attn_norm == "rsqrt_emb_per_head":
-            q *= (self.features // self.num_heads) ** -0.5
-        else:
-            raise ValueError(f"Unknown query_pre_attn_norm: {self.query_pre_attn_norm}")
-
-        k = apply_rope(k, positions=positions)
-        if decode:
-            k, v = update_kv_cache(
-                self, k, v, cache_size=attn_mask.shape[-1], cache_dtype=self.cache_dtype
-            )
-
-        q = einops.rearrange(q, "B T (K G) H -> B T K G H", K=self.num_kv_heads)
-        logits = jnp.einsum("BTKGH,BSKH->BKGTS", q, k)
-        logits = logits.astype(jnp.float32)
-
-        if self.attn_logits_softcap:
-            logits = jnp.tanh(logits / self.attn_logits_softcap)
-            logits = logits * self.attn_logits_softcap
-
-        if attn_mask.shape != (q.shape[0], 1, q.shape[1], k.shape[1]):
-            raise ValueError(
-                f"Attention mask with shape {attn_mask.shape} but shapes for q and k "
-                f"are: {q.shape} and {k.shape}"
-            )
-
-        big_neg = -2.3819763e38  # See gemma/modules.py
-        masked_logits = jnp.where(attn_mask[:, :, None, :, :], logits, big_neg)
-
-        probs = jax.nn.softmax(masked_logits, axis=-1).astype(k.dtype)
-
-        encoded = jnp.einsum("BKGTS,BSKH->BTKGH", probs, v)
-        encoded = einops.rearrange(encoded, "B T K G H -> B T (K G) H")
-        attn_output = self.attn_vec_einsum("BTNH,NHD->BTD", encoded)
+        cache_size = attn_mask.shape[-1]
+        q, k, v = self.get_qkv(x, positions, cache_size, decode)
+        encoded = apply_attention(q, k, v, attn_mask, self.num_kv_heads, self.attn_logits_softcap)
+        attn_output = self.proj_to_embed_dim(encoded)
 
         return attn_output
 
