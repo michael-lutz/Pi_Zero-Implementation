@@ -5,36 +5,6 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-# TODO: Name classes better during refactor
-
-
-class Einsum(nn.Module):
-    """Einsum implementation
-
-    Note: this is taken from the parameterised Einsum implementation in Gemma
-
-    Attributes:
-        shape: shape of the output
-        w_init: initializer for the weights
-    """
-
-    shape: tuple[int, ...]
-    w_init: nn.initializers.Initializer = nn.initializers.zeros_init()
-
-    @nn.compact
-    def __call__(self, eqn: str, x: jax.Array) -> jax.Array:
-        """Apply einsum to input x
-
-        Args:
-            eqn: equation to apply
-            x: input to apply einsum to
-
-        Returns:
-            [B, L, D] output
-        """
-        w = self.param("w", self.w_init, self.shape)
-        return jnp.einsum(eqn, x, w)
-
 
 class MlpBlock(nn.Module):
     """Transformer MLP / feed-forward block.
@@ -100,11 +70,11 @@ class FeedForward(nn.Module):
             ),
             ((2, self.features, self.hidden_dim)),
         )
-        ff_gate = jnp.dot(x, w_gating[0])  # [..., H]
-        gate_value = nn.gelu(ff_gate)  # [..., H]
+        ff_gate = jnp.dot(x, w_gating[0])
+        gate_value = nn.gelu(ff_gate)
 
-        ff1 = jnp.dot(x, w_gating[1])  # [..., H]
-        activations = gate_value * ff1  # [..., H]
+        ff1 = jnp.dot(x, w_gating[1])
+        activations = gate_value * ff1
 
         w_linear = self.param(
             "linear",

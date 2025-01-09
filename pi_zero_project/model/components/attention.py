@@ -6,7 +6,8 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-from pi_zero_project.model.components.linear import Einsum, MlpBlock
+from pi_zero_project.model.components.einsum import Einsum
+from pi_zero_project.model.components.mlp import MlpBlock
 from pi_zero_project.model.components.pos_embed import apply_rope
 
 
@@ -286,7 +287,7 @@ class MAPHead(nn.Module):
         Returns:
             [B, D] output tokens
         """
-        n, l, d = x.shape  # pylint: disable=unused-variable
+        n, _, d = x.shape  # pylint: disable=unused-variable
         probe = self.param("probe", nn.initializers.xavier_uniform(), (1, 1, d), x.dtype)
         probe = jnp.tile(probe, [n, 1, 1])  # [N, 1, D]
 

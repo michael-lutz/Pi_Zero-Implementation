@@ -32,7 +32,7 @@ import scipy.ndimage
 from pi_zero_project.model.components.attention import MAPHead
 from pi_zero_project.model.vlm.img_model.base_img_model import BaseImageModel
 from pi_zero_project.model.components.pos_embed import get_posemb
-from pi_zero_project.model.components.linear import MlpBlock
+from pi_zero_project.model.components.mlp import MlpBlock
 import pi_zero_project.utils.param_utils as u
 
 
