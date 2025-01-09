@@ -12,7 +12,7 @@ from pi_zero_project.training.data_utils.jax_lerobot_dataset import JaxLeRobotDa
 from pi_zero_project.training.model_from_config import get_model
 from pi_zero_project.training.objectives.flow_matching_action import train_step
 
-checkpoint_dir = "../../checkpoints/"
+checkpoint_dir = "../checkpoints/"
 
 # Configuration for model selection
 config = {
@@ -89,7 +89,7 @@ for epoch in range(10):  # Number of epochs
             print(f"Epoch {epoch}, Loss: {loss}")
 
         if i % save_every_n_steps == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{i}.pkl")
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{epoch}_{i}.pkl")
             os.makedirs(checkpoint_dir, exist_ok=True)  # Ensure the directory exists
             with open(checkpoint_path, "wb") as f:
                 pickle.dump(params, f)
