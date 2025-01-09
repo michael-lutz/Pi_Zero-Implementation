@@ -15,7 +15,7 @@ There are many dimensions... For the reader's benefit:
 - a: size of action dimension
 """
 
-from typing import Any, Dict, List, Sequence, Tuple, TypedDict
+from typing import List, Tuple, TypedDict
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -27,6 +27,49 @@ from pi_zero_project.model.components.norms import RMSNorm
 from pi_zero_project.model.components.token_embed import Embedder
 from pi_zero_project.model.policy.action_embedding import ActionEmbedder
 from pi_zero_project.model.vlm.img_model import vit
+
+
+def visualize_moe_attention_masks(x: List[Tuple[str, jax.Array]], attn_mask: jax.Array) -> None:
+    """Visualize the overall attention mask + which mixtures are being attended to.
+
+    NOTE: Assumes the attention mask is constant across the batch dimension.
+
+    Args:
+        x: list of (mixture name, [B, L, D] input embeddings)
+        attn_mask: [..., L, S] attention mask
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    mixture_names = [mixture_name for mixture_name, _ in x]
+    unique_mixtures = list(set(mixture_names))
+    colors = plt.cm.get_cmap("viridis", len(unique_mixtures))
+    color_map = {name: colors(i) for i, name in enumerate(unique_mixtures)}
+
+    if len(attn_mask.shape) == 4:
+        attn_mask = attn_mask[0, 0, :, :]
+    elif len(attn_mask.shape) == 3:
+        attn_mask = attn_mask[0, :, :]
+    elif len(attn_mask.shape) == 2:
+        pass
+    else:
+        raise ValueError(f"Invalid attention mask shape: {attn_mask.shape}")
+
+    grid = np.zeros(attn_mask.shape + (3,))  # Add a color dimension
+
+    start_idx = 0
+    for mixture_name, mixture_data in x:
+        num_tokens = mixture_data.shape[1]
+        end_idx = start_idx + num_tokens
+
+        for i in range(start_idx, end_idx):
+            indices = np.where(attn_mask[i, :] == 1)
+            grid[i, indices] = color_map[mixture_name][:3]
+        start_idx = end_idx
+
+    plt.imshow(grid, interpolation="nearest")
+    plt.title("Attention Mask Visualization")
+    plt.show()
 
 
 class MixtureSpec(TypedDict):
@@ -105,14 +148,6 @@ class MoEBlock(nn.Module):
                 spec["name"]: RMSNorm(name=f"{spec['name']}_post_ffw_norm")
                 for spec in self.mixture_specs
             }
-
-    def visualize_attention_mask(self, attn_mask: jax.Array) -> None:
-        """Visualize the attention mask.
-
-        Args:
-            attn_mask: [B, 1, L, S] attention mask
-        """
-        pass
 
     def _process_attention_output(
         self, attn_output: jax.Array, residual: jax.Array, deterministic: bool, mixture_name: str
@@ -251,6 +286,37 @@ class PiZero(nn.Module):
     scan: bool = False
     remat_policy: str = "none"
 
+    def make_attention_map(
+        self, images: jax.Array, text: jax.Array, proprio: jax.Array, action: jax.Array
+    ) -> jax.Array:
+        """Make the attention map for the Pi_Zero policy.
+
+        Args:
+            images: [B, I, h_i, w_i, 3] images
+            text: [B, T] text tokens
+            proprio: [B, P, p] proprioceptive features (P is assumed to be 1 in the paper)
+            action: [B, A, a] action to predict
+        Returns:
+            [B, 1, L, S] attention mask
+        """
+        L = images.shape[1] + text.shape[1] + proprio.shape[1] + action.shape[1]
+        B = images.shape[0]
+        I = images.shape[1]
+        T = text.shape[1]
+        P = proprio.shape[1]
+        input_mask = np.ones([B, L])
+        # NOTE: if images are missing, assume the dataloader populated them with all 0
+        img_mask = images.any(axis=(-3, -2, -1))
+        input_mask[:, :I] = input_mask[:, :I] * img_mask
+        mask_ar = np.zeros([B, L])
+        mask_ar[:, I + T] = 1
+        mask_ar[:, I + T + P] = 1
+        input_mask = jnp.array(input_mask)
+        mask_ar = jnp.array(mask_ar)
+        attn_mask = make_attn_mask(input_mask, mask_ar)
+        attn_mask = attn_mask[:, None, :, :]
+        return attn_mask
+
     @nn.compact
     def __call__(
         self,
@@ -286,9 +352,7 @@ class PiZero(nn.Module):
         B = images.shape[0]
         A = action.shape[1]
         a = action.shape[2]
-        P = proprio.shape[1]
         I = images.shape[1]
-        T = text.shape[1]
 
         action_token_embed = ActionEmbedder(
             embed_dim=self.action_expert_embed_dim, name="action_embedder"
@@ -334,20 +398,7 @@ class PiZero(nn.Module):
             text_token_embed = jnp.zeros((B, 0, self.gemma_embed_dim))
 
         # run attention (need to pass in)
-        L = I + T + P + A
-
-        # Applying block-wise causal mask as in the paper
-        input_mask = np.ones([B, L])
-        # NOTE: if images are missing, assume we populate them with all 0
-        img_mask = images.any(axis=(-3, -2, -1))
-        input_mask[:, :I] = input_mask[:, :I] * img_mask
-        mask_ar = np.zeros([B, L])
-        mask_ar[:, I + T] = 1
-        mask_ar[:, I + T + P] = 1
-        input_mask = jnp.array(input_mask)
-        mask_ar = jnp.array(mask_ar)
-        attn_mask = make_attn_mask(input_mask, mask_ar)
-        attn_mask = attn_mask[:, None, :, :]
+        attn_mask = self.make_attention_map(images, text, proprio, action)
 
         if self.remat_policy == "none":
             block_cls = MoEBlock
@@ -419,5 +470,6 @@ class PiZero(nn.Module):
 
         action_embeddings = x[-1][1][:, -A:, :]
         action_field_pred = nn.Dense(features=a, name="proj_action_dim")(action_embeddings)
+        # [B, A, a] result
 
         return action_field_pred, out
