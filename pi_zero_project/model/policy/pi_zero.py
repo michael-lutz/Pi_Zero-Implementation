@@ -312,7 +312,6 @@ class PiZero(nn.Module):
 
         return action_field_pred, out
 
-    @jax.jit
     def generate_action(
         self,
         prng: jax.Array,
