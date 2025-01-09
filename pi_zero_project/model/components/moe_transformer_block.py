@@ -164,7 +164,6 @@ class MoETransformerBlock(nn.Module):
             all_k,
             all_v,
             attn_mask,
-            num_kv_heads=self.num_kv_heads,
             attn_logits_softcap=self.attn_logits_softcap,
         )
 

@@ -93,22 +93,25 @@ def apply_attention(
     k: jax.Array,
     v: jax.Array,
     attn_mask: jax.Array,
-    num_kv_heads: int,
     attn_logits_softcap: float | None,
 ) -> jax.Array:
     """Apply attention to q, k, v. in gemma style.
 
     Args:
-        q: [B, T, D] query tokens
-        k: [B, S, D] key tokens
-        v: [B, S, D] value tokens
+        q: [B, T, num_heads, H] query tokens
+        k: [B, S, num_kv_heads, H] key tokens
+        v: [B, S, num_kv_heads, H] value tokens
         attn_mask: [B, 1, T, S] attention mask
         num_kv_heads: number of key/value heads
         attn_logits_softcap: attention logits softcap
 
     Returns:
-        [B, T, D] output embeddings
+        [B, T, num_heads, H] output embeddings
     """
+    assert (
+        len(v.shape) == 4 and len(k.shape) == 4 and len(q.shape) == 4
+    ), "k and q must have 4 dimensions"
+    num_kv_heads = k.shape[2]
     q = einops.rearrange(q, "B T (K G) H -> B T K G H", K=num_kv_heads)
     logits = jnp.einsum("BTKGH,BSKH->BKGTS", q, k)
     logits = logits.astype(jnp.float32)
@@ -211,7 +214,7 @@ class Attention(nn.Module):
             decode: whether to use kv-cache
 
         Returns:
-            Tuple[jax.Array, jax.Array, jax.Array]: q, k, v
+            Tuple[jax.Array, jax.Array, jax.Array]: q, k, v [B, L, num_heads, H]
         """
         if self.num_kv_heads == self.num_heads:
             q, k, v = self.qkv_einsum("BSD,3KDH->3BSKH", x)
@@ -265,7 +268,7 @@ class Attention(nn.Module):
         """
         cache_size = attn_mask.shape[-1]
         q, k, v = self.get_qkv(x, positions, cache_size, decode)
-        encoded = apply_attention(q, k, v, attn_mask, self.num_kv_heads, self.attn_logits_softcap)
+        encoded = apply_attention(q, k, v, attn_mask, self.attn_logits_softcap)
         attn_output = self.proj_to_embed_dim(encoded)
 
         return attn_output

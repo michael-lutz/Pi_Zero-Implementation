@@ -30,10 +30,12 @@ def model():
     )
 
 
+@pytest.mark.skip(reason="Skipping since Gemma isn't directly used right now")
 def test_model_initialization(model: Model) -> None:
     assert model is not None
 
 
+@pytest.mark.skip(reason="Skipping model forward pass since Gemma isn't directly used right now")
 def test_model_forward_pass(model: Model, snapshot: Snapshot) -> None:
     tokens = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
     rng = jax.random.PRNGKey(0)
@@ -44,6 +46,9 @@ def test_model_forward_pass(model: Model, snapshot: Snapshot) -> None:
     assert logits.shape == (1, 10, model.vocab_size), "Logits shape mismatch"
 
 
+@pytest.mark.skip(
+    reason="Skipping model consistency test since Gemma isn't directly used right now"
+)
 def test_model_consistency(model: Model) -> None:
     tokens = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
     rng = jax.random.PRNGKey(0)

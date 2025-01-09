@@ -58,6 +58,134 @@ class PiZero(nn.Module):
     scan: bool = False
     remat_policy: str = "none"
 
+    @nn.compact
+    def __call__(
+        self,
+        images: jax.Array,
+        text: jax.Array,
+        proprio: jax.Array,
+        action: jax.Array,
+        timesteps: jax.Array,
+        *,
+        inference_mode: bool = False,
+        deterministic: bool = True,
+        return_intermediates: bool = False,
+    ) -> tuple[jax.Array, dict[str, jax.Array]]:
+        """Primary call function for Pi_Zero
+
+        Args:
+            images: [B, I, h_i, w_i, 3] images
+            text: [B, T] text tokens
+            proprio: [B, P, p] proprioceptive features (P is assumed to be 1 in the paper)
+            action: [B, A, a] action to predict
+            timesteps: [B] timesteps
+            inference_mode: bool, whether to return the output of the policy
+            return_intermediates: bool, whether to return the intermediate embeddings
+        Returns:
+            [B, A, a] output of the policy
+        """
+        assert images.shape[0] == text.shape[0] == proprio.shape[0] == action.shape[0]
+        assert len(images.shape) == 5, "images must be [B, I, h_i, w_i, 3]"
+        assert len(text.shape) == 2, "text must be [B, T]"
+        assert len(proprio.shape) == 3, "proprio must be [B, P, p]"
+        assert len(action.shape) == 3, "action must be [B, A, a]"
+        assert len(timesteps.shape) == 1, "timesteps must be [B]"
+
+        out = {}
+
+        # Embed necessary inputs
+        action_token_embed = self.embed_action(action, timesteps)  # [B, A, D]
+
+        if (
+            inference_mode
+            and self.has_variable("cache", "o_keys")
+            and self.has_variable("cache", "o_values")
+        ):
+            # Can skip ahead to attention if we have cache
+            # TODO: implement fast and cached inference
+            pass
+
+        proprio_token_embed = self.embed_proprio(proprio)  # [B, P, D]
+        text_token_embed = self.embed_text(text)  # [B, T, D]
+        image_token_embed = self.embed_images(images)  # [B, I, D]
+
+        if return_intermediates:
+            out["image_embeddings"] = image_token_embed
+            out["text_embeddings"] = text_token_embed
+            out["proprio_embeddings"] = proprio_token_embed
+            out["action_embeddings"] = action_token_embed
+
+        # Create attention mask and blocks
+        attn_mask = self.make_attention_mask(images, text, proprio, action)  # [B, 1, L, L]
+        blocks = self.create_attention_blocks()
+
+        # Run through attention blocks
+        x = [
+            ("gemma", jnp.concatenate([image_token_embed, text_token_embed], axis=1)),
+            ("action_expert", jnp.concatenate([proprio_token_embed, action_token_embed], axis=1)),
+        ]
+
+        if return_intermediates:
+            out["pre_attention"] = x
+        for block in blocks:
+            x = block(
+                x=x,
+                attn_mask=attn_mask,
+                use_kv_cache=inference_mode,
+                deterministic=deterministic,
+            )
+
+        if return_intermediates:
+            out["post_attention"] = x
+
+        for i, (mixture_name, x_mixture) in enumerate(x):
+            x[i] = (mixture_name, RMSNorm(name=f"{mixture_name}_final_norm")(x_mixture))
+
+        if return_intermediates:
+            out["final_normed_embeddings"] = x
+
+        action_embeddings = x[-1][1][:, -action.shape[1] :, :]
+        action_field_pred = nn.Dense(features=action.shape[2], name="proj_action_dim")(
+            action_embeddings
+        )
+        # [B, A, a] result
+
+        return action_field_pred, out
+
+    def generate_action(
+        self,
+        prng: jax.Array,
+        images: jax.Array,
+        text: jax.Array,
+        proprio: jax.Array,
+        action_shape: Tuple[int, ...],
+        *,
+        num_steps: int = 10,
+    ) -> jax.Array:
+        """Generate an action from the policy.
+
+        Args:
+            prng: [B] PRNG key
+            images: [B, I, h_i, w_i, 3] images
+            text: [B, T] text tokens
+            proprio: [B, P, p] proprioceptive features (P is assumed to be 1 in the paper)
+            action_shape: [B, A, a] action shape
+        Returns:
+            [B, A, a] action
+        """
+        action = sample_starting_noise(prng, action_shape)
+        delta = 1 / num_steps
+        B = action.shape[0]
+
+        # basic integration of the action field
+        for i in range(num_steps):
+            tau = jnp.array(i / num_steps)
+            tau = jnp.tile(tau, (B,))
+
+            action_field_pred, _ = self(images, text, proprio, action, tau)
+            action += delta * action_field_pred
+        return action
+
     def embed_action(self, action: jax.Array, timesteps: jax.Array) -> jax.Array:
         """Embed the action into the action expert
 
@@ -217,131 +345,3 @@ class PiZero(nn.Module):
                 for layer in range(self.depth)
             ]
         return blocks
-
-    @nn.compact
-    def __call__(
-        self,
-        images: jax.Array,
-        text: jax.Array,
-        proprio: jax.Array,
-        action: jax.Array,
-        timesteps: jax.Array,
-        *,
-        inference_mode: bool = False,
-        deterministic: bool = True,
-        return_intermediates: bool = False,
-    ) -> tuple[jax.Array, dict[str, jax.Array]]:
-        """Primary call function for Pi_Zero
-
-        Args:
-            images: [B, I, h_i, w_i, 3] images
-            text: [B, T] text tokens
-            proprio: [B, P, p] proprioceptive features (P is assumed to be 1 in the paper)
-            action: [B, A, a] action to predict
-            timesteps: [B] timesteps
-            inference_mode: bool, whether to return the output of the policy
-            return_intermediates: bool, whether to return the intermediate embeddings
-        Returns:
-            [B, A, a] output of the policy
-        """
-        assert images.shape[0] == text.shape[0] == proprio.shape[0] == action.shape[0]
-        assert len(images.shape) == 5, "images must be [B, I, h_i, w_i, 3]"
-        assert len(text.shape) == 2, "text must be [B, T]"
-        assert len(proprio.shape) == 3, "proprio must be [B, P, p]"
-        assert len(action.shape) == 3, "action must be [B, A, a]"
-        assert len(timesteps.shape) == 1, "timesteps must be [B]"
-
-        out = {}
-
-        # Embed necessary inputs
-        action_token_embed = self.embed_action(action, timesteps)  # [B, A, D]
-
-        if (
-            inference_mode
-            and self.has_variable("cache", "o_keys")
-            and self.has_variable("cache", "o_values")
-        ):
-            # Can skip ahead to attention if we have cache
-            # TODO: implement fast and cached inference
-            pass
-
-        proprio_token_embed = self.embed_proprio(proprio)  # [B, P, D]
-        text_token_embed = self.embed_text(text)  # [B, T, D]
-        image_token_embed = self.embed_images(images)  # [B, I, D]
-
-        if return_intermediates:
-            out["image_embeddings"] = image_token_embed
-            out["text_embeddings"] = text_token_embed
-            out["proprio_embeddings"] = proprio_token_embed
-            out["action_embeddings"] = action_token_embed
-
-        # Create attention mask and blocks
-        attn_mask = self.make_attention_mask(images, text, proprio, action)  # [B, 1, L, L]
-        blocks = self.create_attention_blocks()
-
-        # Run through attention blocks
-        x = [
-            ("gemma", jnp.concatenate([image_token_embed, text_token_embed], axis=1)),
-            ("action_expert", jnp.concatenate([proprio_token_embed, action_token_embed], axis=1)),
-        ]
-
-        if return_intermediates:
-            out["pre_attention"] = x
-        for block in blocks:
-            x = block(
-                x=x,
-                attn_mask=attn_mask,
-                use_kv_cache=inference_mode,
-                deterministic=deterministic,
-            )
-
-        if return_intermediates:
-            out["post_attention"] = x
-
-        for i, (mixture_name, x_mixture) in enumerate(x):
-            x[i] = (mixture_name, RMSNorm(name=f"{mixture_name}_final_norm")(x_mixture))
-
-        if return_intermediates:
-            out["final_normed_embeddings"] = x
-
-        action_embeddings = x[-1][1][:, -action.shape[1] :, :]
-        action_field_pred = nn.Dense(features=action.shape[2], name="proj_action_dim")(
-            action_embeddings
-        )
-        # [B, A, a] result
-
-        return action_field_pred, out
-
-    def generate_action(
-        self,
-        prng: jax.Array,
-        images: jax.Array,
-        text: jax.Array,
-        proprio: jax.Array,
-        action_shape: Tuple[int, ...],
-        *,
-        num_steps: int = 10,
-    ) -> jax.Array:
-        """Generate an action from the policy.
-
-        Args:
-            prng: [B] PRNG key
-            images: [B, I, h_i, w_i, 3] images
-            text: [B, T] text tokens
-            proprio: [B, P, p] proprioceptive features (P is assumed to be 1 in the paper)
-            action_shape: [B, A, a] action shape
-        Returns:
-            [B, A, a] action
-        """
-        action = sample_starting_noise(prng, action_shape)
-        delta = 1 / num_steps
-        B = action.shape[0]
-
-        # basic integration of the action field
-        for i in range(num_steps):
-            tau = jnp.array(i / num_steps)
-            tau = jnp.tile(tau, (B,))
-
-            action_field_pred, _ = self(images, text, proprio, action, tau)
-            action += delta * action_field_pred
-        return action
